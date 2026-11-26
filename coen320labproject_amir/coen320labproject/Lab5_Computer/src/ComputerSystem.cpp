@@ -1,9 +1,12 @@
 #include "ComputerSystem.h"
 #include "ATCTimer.h"
 #include <ctime>        // For std::time_t, std::localtime
+#include <cstdio>
 #include <iomanip>      // For std::put_time
 #include <cmath>
+#include <mutex>
 #include <sys/dispatch.h>
+#include <sys/neutrino.h>
 #include <cstring> // For memcpy
 #include <semaphore.h>
 
@@ -15,11 +18,40 @@
 #define SHM_SIZE sizeof(SharedMemory)
 #define SEM_NAME "/mammad_sem"
 
+#define COMPUTER_CHANNEL_NAME "mammad_computer"
+#define STOP_PULSE_CODE (_PULSE_CODE_MINAVAIL + 1)
+
+namespace {
+name_attach_t* g_computerChannel = NULL;
+std::atomic<bool> g_operatorStop(false);
+std::mutex g_constraintMutex;
+}
+
 
 ComputerSystem::ComputerSystem() : shm_fd(-1), shared_mem(nullptr), running(false) {}
 
 ComputerSystem::~ComputerSystem() {
     joinThread();
+
+    // Wake and stop the operator listener.
+    g_operatorStop.store(true);
+    if (g_computerChannel != NULL) {
+        int coid = ConnectAttach(0, 0, g_computerChannel->chid, 0, 0);
+        if (coid != -1) {
+            MsgSendPulse(coid, -1, STOP_PULSE_CODE, 0);
+            ConnectDetach(coid);
+        }
+    }
+
+    if (monitorOperatorInput.joinable()) {
+        monitorOperatorInput.join();
+    }
+
+    if (g_computerChannel != NULL) {
+        name_detach(g_computerChannel, 0);
+        g_computerChannel = NULL;
+    }
+
     cleanupSharedMemory();
 }
 
@@ -71,15 +103,26 @@ void ComputerSystem::cleanupSharedMemory() {
 }
 
 bool ComputerSystem::startMonitoring() {
-    if (initializeSharedMemory()) {
-        running = true; // will be used in monitorAirspace
-        std::cout << "Starting monitoring thread." << std::endl;
-        monitorThread = std::thread(&ComputerSystem::monitorAirspace, this);
-        return true;
-    } else {
+    if (!initializeSharedMemory()) {
         std::cerr << "Failed to initialize shared memory. Monitoring not started.\n";
         return false;
     }
+
+    g_operatorStop.store(false);
+    g_computerChannel = name_attach(NULL, COMPUTER_CHANNEL_NAME, 0);
+    if (g_computerChannel == NULL) {
+        perror("ComputerSystem: name_attach failed");
+    }
+
+    running = true;
+    std::cout << "Starting monitoring thread." << std::endl;
+
+    monitorThread = std::thread(&ComputerSystem::monitorAirspace, this);
+    if (g_computerChannel != NULL) {
+        monitorOperatorInput = std::thread(&ComputerSystem::processMessage, this);
+    }
+
+    return true;
 }
 
 void ComputerSystem::joinThread() {
