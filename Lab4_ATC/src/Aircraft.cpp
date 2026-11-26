@@ -9,6 +9,8 @@
 //Coen320_Lab (Task0): Radar Channel name should contain your group name
 #define Radar "mammad_radar" //attach point for AirTrafficControl
 #define Display_ID "mammad_display" //attach point for AirTrafficControl // You need to set this for Part 2 (Display)*/
+#define Aircraft "mammad_aircraft"
+
 
 void* updatePositionThread(void* arg) {
     Aircraft* aircraft = static_cast<Aircraft*>(arg);
@@ -141,114 +143,71 @@ int Aircraft::updatePosition() {
         int rcvid = MsgReceive(Plane_channel->chid, buffer, sizeof(buffer), NULL);
 
        if (rcvid != -1) {
+			bool isInterProcess = buffer[0] & 0x01;
+        	if (isInterProcess) {
+            	// Handle inter-process messages from Operator Console
+                Message_inter_process* interMsg = reinterpret_cast<Message_inter_process*>(buffer);
+                int ack = 0;  // Initialize acknowledgment code
 
-        	bool isInterProcess = buffer[0] & 0x01;
-            // Radar requested position data
-            if (isInterProcess){  //sporadic
-            	// Message is of type Message_inter_process
-            	Message_inter_process* receivedMsg = reinterpret_cast<Message_inter_process*>(buffer);
-
-            	// Handle different message types using switch
-                // COEN320 Lab 4_5: You need to handle different message types here
-                // These commands come from Communication System
-                /*
-                switch (receivedMsg->type) {
-                    case MessageType::REQUEST_CHANGE_OF_HEADING:
-                    case MessageType::REQUEST_CHANGE_POSITION:
-                    ....
-                */
-               if (receivedMsg->type == MessageType::REQUEST_AUGMENTED_INFO) {
-                    msg_plane_info info = {id, posX, posY, posZ, speedX, speedY, speedZ};
-                    MsgReply(rcvid, 0, &info, sizeof(info));
-                } else {
-                    int status = 0;
-
-                    switch (receivedMsg->type) {
+                // Only process if the message is for this aircraft
+                if (interMsg->planeID == id || interMsg->planeID == -1) {  // -1 = broadcast to all
+                    switch (interMsg->type) {
                         case MessageType::REQUEST_CHANGE_OF_HEADING: {
-                            if (receivedMsg->dataSize < sizeof(msg_change_heading)) {
-                                status = -1;
-                                break;
-                            }
-                            msg_change_heading change;
-                            std::memcpy(&change, receivedMsg->data.data(), sizeof(change));
-
-                            // 0 or negative means "leave altitude unchanged"
-                            // (valid airspace altitudes are 15,000-40,000)
-                            if (change.altitude > 0.0 &&
-                                (change.altitude < airspace.lower_z_boundary ||
-                                 change.altitude > airspace.upper_z_boundary)) {
-                                status = -1;
-                                break;
-                            }
-
-                            changeHeading(change.VelocityX, change.VelocityY, change.VelocityZ);
-                            if (change.altitude > 0.0) {
-                                posZ = change.altitude;
-                                speedZ = 0.0;
+                            if (interMsg->dataSize == sizeof(msg_change_heading)) {
+                                msg_change_heading* cmdHeading = reinterpret_cast<msg_change_heading*>(interMsg->data.data());
+                                changeHeading(cmdHeading->VelocityX, cmdHeading->VelocityY, cmdHeading->VelocityZ);
+                                std::cout << "Aircraft " << id << " heading changed to V("
+                                          << speedX << ", " << speedY << ", " << speedZ << ")\n";
+                                ack = 0;  // Success
+                            } else {
+                                std::cerr << "Aircraft " << id << ": Invalid heading command data size\n";
+                                ack = 1;  // Error code 1 = invalid data size
                             }
                             break;
-                        }
-
+                    	}
                         case MessageType::REQUEST_CHANGE_POSITION: {
-                            if (receivedMsg->dataSize < sizeof(msg_change_position)) {
-                                status = -1;
-                                break;
+                            if (interMsg->dataSize == sizeof(msg_change_position)) {
+                                msg_change_position* cmdPos = reinterpret_cast<msg_change_position*>(interMsg->data.data());
+                                posX = cmdPos->x;
+                                posY = cmdPos->y;
+                                posZ = cmdPos->z;
+                                std::cout << "Aircraft " << id << " position changed to ("
+                                          << posX << ", " << posY << ", " << posZ << ")\n";
+                                ack = 0;  // Success
+                            } else {
+                                std::cerr << "Aircraft " << id << ": Invalid position command data size\n";
+                                ack = 1;  // Error code 1 = invalid data size
                             }
-                            msg_change_position change;
-                            std::memcpy(&change, receivedMsg->data.data(), sizeof(change));
-
-                            if (change.x < airspace.lower_x_boundary ||
-                                change.x > airspace.upper_x_boundary ||
-                                change.y < airspace.lower_y_boundary ||
-                                change.y > airspace.upper_y_boundary ||
-                                change.z < airspace.lower_z_boundary ||
-                                change.z > airspace.upper_z_boundary) {
-                                status = -1;
-                                break;
-                            }
-
-                            posX = change.x;
-                            posY = change.y;
-                            posZ = change.z;
                             break;
                         }
-
                         case MessageType::REQUEST_CHANGE_ALTITUDE: {
-                            if (receivedMsg->dataSize < sizeof(double)) {
-                                status = -1;
-                                break;
+                            if (interMsg->dataSize == sizeof(double)) {
+                                double* newAltitude = reinterpret_cast<double*>(interMsg->data.data());
+                                posZ = *newAltitude;
+                                std::cout << "Aircraft " << id << " altitude changed to " << posZ << "\n";
+                                ack = 0;  // Success
+                            } else {
+                                std::cerr << "Aircraft " << id << ": Invalid altitude command data size\n";
+                                ack = 1;  // Error code 1 = invalid data size
                             }
-                            double altitude = 0.0;
-                            std::memcpy(&altitude, receivedMsg->data.data(), sizeof(altitude));
-
-                            if (altitude < airspace.lower_z_boundary ||
-                                altitude > airspace.upper_z_boundary) {
-                                status = -1;
-                                break;
-                            }
-
-                            posZ = altitude;
-                            speedZ = 0.0;   // hold the new altitude
                             break;
                         }
-
                         default:
-                            status = -1;    // unsupported command
+                            std::cerr << "Aircraft " << id << ": Unknown message type\n";
+                            ack = 2;  // Error code 2 = unknown message type
                             break;
                     }
-
-                    MsgReply(rcvid, 0, &status, sizeof(status));
                 }
-            } else {  //periodic
-            	// Message is of type Message
-            	Message* receivedMsg = reinterpret_cast<Message*>(buffer);
 
-            	if (receivedMsg->type == MessageType::REQUEST_POSITION) {
-            		msg_plane_info positionData = {id, posX, posY, posZ, speedX, speedY, speedZ};
-            	    Message posUpdateMessage = createPositionUpdateMessage(id, positionData);
-
-            	    MsgReply(rcvid, 0, &posUpdateMessage, sizeof(posUpdateMessage)); // Send reply with position
-            	}
+                // Reply to sender (acknowledgment) - must be within rcvid validity scope
+                MsgReply(rcvid, 0, &ack, sizeof(ack));
+            } else {
+                Message* receivedMsg = reinterpret_cast<Message*>(buffer);
+                if (receivedMsg->type == MessageType::REQUEST_POSITION) {
+                    msg_plane_info positionData = {id, posX, posY, posZ, speedX, speedY, speedZ};
+                    Message posUpdateMessage = createPositionUpdateMessage(id, positionData);
+                    MsgReply(rcvid, 0, &posUpdateMessage, sizeof(posUpdateMessage));
+                }
             }
         }
 
