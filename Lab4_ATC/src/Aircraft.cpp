@@ -7,8 +7,8 @@
 
 
 //Coen320_Lab (Task0): Radar Channel name should contain your group name
-#define Radar "my_group_Radar" //attach point for AirTrafficControl
-/*#define Display_ID "display" //attach point for AirTrafficControl // You need to set this for Part 2 (Display)*/
+#define Radar "mammad_radar" //attach point for AirTrafficControl
+#define Display_ID "mammad_display" //attach point for AirTrafficControl // You need to set this for Part 2 (Display)*/
 
 void* updatePositionThread(void* arg) {
     Aircraft* aircraft = static_cast<Aircraft*>(arg);
@@ -21,12 +21,13 @@ Aircraft::Aircraft(int id, double x, double y, double z, double sx, double sy, d
 	message_id = -1;
 	Radar_id = -1;
 	airspace = {0, 100000, 0, 100000, 15000, 40000};
-	// Coen320_Lab4(Task1): You need to create a thread worker
+
+	// Coen320_lab3(Task1): You need to create a thread worker
 	// Worker function: updatePositionThread
 	// Worker function parameters: (void*)this
 	// Thread handler id: thread_id
 	//Note: you need to verify if the thread creation is successful, otherwise print the error
-
+	pthread_create(&thread_id, NULL, updatePositionThread, (void*)this);
 }
 
 Aircraft::~Aircraft(){};
@@ -46,9 +47,14 @@ void Aircraft::printInitialAircraftData() const {
 
 
 void Aircraft::changeHeading(double Vx, double Vy, double Vz){
-	if (Vx > 0) speedX = Vx;
-	if (Vx > 0) speedY = Vy;
-	if (Vx > 0) speedZ = Vz;
+	//allow negative speeds
+    //if (Vx > 0) speedX = Vx;
+	//if (Vx > 0) speedY = Vy;
+	//if (Vx > 0) speedZ = Vz;
+
+    speedX = Vx;
+	speedY = Vy;
+	speedZ = Vz;
 }
 
 
@@ -67,7 +73,7 @@ int Aircraft::updatePosition() {
     // Open channel with radar and verify if the channel opened successfully
     //Use the function name_open with the radar channel name and parameter 0
 
-    if ((Radar_id = /* open the channel here*/) == -1) {
+    if ((Radar_id = name_open("mammad_radar", 0)) == -1) {
 		perror("Error occurred while creating the channel with Radar");
 		return EXIT_FAILURE;
 	}
@@ -75,6 +81,8 @@ int Aircraft::updatePosition() {
     //Coen320_Lab4(Task6): Once the arrival time is reached, send the ENTER_AIRSPACE message
     //Read and learn how we create a message
     Message enterAirspaceMessage = createEnterAirspaceMessage(id);
+    enterAirspaceMessage.type = MessageType::ENTER_AIRSPACE;
+    MsgSend(Radar_id, &enterAirspaceMessage,sizeof(enterAirspaceMessage), 0,0);
 
     // Send message
     //Coen320_Lab4(Task7): send the message Using the MsgSend function to Radar_id channel
@@ -87,7 +95,7 @@ int Aircraft::updatePosition() {
     //For more information use ctrl+space
     //answer: MsgSend(Radar_id, &createEnterAirspaceMessage, sizeof(createEnterAirspaceMessage),0,0)
 
-    if (/* Put the MsgSend function here*/ == -1) {
+    if (MsgSend(Radar_id, &enterAirspaceMessage,sizeof(enterAirspaceMessage), 0,0) == -1) {
             std::cout << "Failed to send enter message to Radar!\n";
             return EXIT_FAILURE;
 	}
@@ -96,7 +104,7 @@ int Aircraft::updatePosition() {
     //Coen320_Lab4 (Task0): Create channel to be reachable by radar that wants to poll the Airplane
     //To choose the polling channel concatenate your group name with the plane id
     //Note: It is critical to not interfere with other groups
-    std::string id_str = "your_group_name_or_id"+std::to_string(id);  // Convert integer id to string
+    std::string id_str = "mammad_radar"+std::to_string(id);  // Convert integer id to string
     const char* ID = id_str.c_str();         // Convert string to const char*
     name_attach_t* Plane_channel = name_attach(NULL, ID, 0); // For server
 
@@ -132,7 +140,7 @@ int Aircraft::updatePosition() {
         char buffer[sizeof(Message_inter_process)];  // Buffer to handle largest message size
         int rcvid = MsgReceive(Plane_channel->chid, buffer, sizeof(buffer), NULL);
 
-        if (rcvid != -1) {
+       if (rcvid != -1) {
 
         	bool isInterProcess = buffer[0] & 0x01;
             // Radar requested position data
@@ -149,6 +157,88 @@ int Aircraft::updatePosition() {
                     case MessageType::REQUEST_CHANGE_POSITION:
                     ....
                 */
+               if (receivedMsg->type == MessageType::REQUEST_AUGMENTED_INFO) {
+                    msg_plane_info info = {id, posX, posY, posZ, speedX, speedY, speedZ};
+                    MsgReply(rcvid, 0, &info, sizeof(info));
+                } else {
+                    int status = 0;
+
+                    switch (receivedMsg->type) {
+                        case MessageType::REQUEST_CHANGE_OF_HEADING: {
+                            if (receivedMsg->dataSize < sizeof(msg_change_heading)) {
+                                status = -1;
+                                break;
+                            }
+                            msg_change_heading change;
+                            std::memcpy(&change, receivedMsg->data.data(), sizeof(change));
+
+                            // 0 or negative means "leave altitude unchanged"
+                            // (valid airspace altitudes are 15,000-40,000)
+                            if (change.altitude > 0.0 &&
+                                (change.altitude < airspace.lower_z_boundary ||
+                                 change.altitude > airspace.upper_z_boundary)) {
+                                status = -1;
+                                break;
+                            }
+
+                            changeHeading(change.VelocityX, change.VelocityY, change.VelocityZ);
+                            if (change.altitude > 0.0) {
+                                posZ = change.altitude;
+                                speedZ = 0.0;
+                            }
+                            break;
+                        }
+
+                        case MessageType::REQUEST_CHANGE_POSITION: {
+                            if (receivedMsg->dataSize < sizeof(msg_change_position)) {
+                                status = -1;
+                                break;
+                            }
+                            msg_change_position change;
+                            std::memcpy(&change, receivedMsg->data.data(), sizeof(change));
+
+                            if (change.x < airspace.lower_x_boundary ||
+                                change.x > airspace.upper_x_boundary ||
+                                change.y < airspace.lower_y_boundary ||
+                                change.y > airspace.upper_y_boundary ||
+                                change.z < airspace.lower_z_boundary ||
+                                change.z > airspace.upper_z_boundary) {
+                                status = -1;
+                                break;
+                            }
+
+                            posX = change.x;
+                            posY = change.y;
+                            posZ = change.z;
+                            break;
+                        }
+
+                        case MessageType::REQUEST_CHANGE_ALTITUDE: {
+                            if (receivedMsg->dataSize < sizeof(double)) {
+                                status = -1;
+                                break;
+                            }
+                            double altitude = 0.0;
+                            std::memcpy(&altitude, receivedMsg->data.data(), sizeof(altitude));
+
+                            if (altitude < airspace.lower_z_boundary ||
+                                altitude > airspace.upper_z_boundary) {
+                                status = -1;
+                                break;
+                            }
+
+                            posZ = altitude;
+                            speedZ = 0.0;   // hold the new altitude
+                            break;
+                        }
+
+                        default:
+                            status = -1;    // unsupported command
+                            break;
+                    }
+
+                    MsgReply(rcvid, 0, &status, sizeof(status));
+                }
             } else {  //periodic
             	// Message is of type Message
             	Message* receivedMsg = reinterpret_cast<Message*>(buffer);

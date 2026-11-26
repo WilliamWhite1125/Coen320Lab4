@@ -7,7 +7,7 @@
 #include <cstring> // For memcpy
 
 // COEN320 Task 3.1, set the display channel name (it should be the same as the Coen320_Lab (Task0) Display channel name)
-#define display_channel_name "display"
+#define display_channel_name "mammad_display"
 
 
 ComputerSystem::ComputerSystem() : shm_fd(-1), shared_mem(nullptr), running(false) {}
@@ -23,10 +23,28 @@ bool ComputerSystem::initializeSharedMemory() {
         // COEN320 Task 3.2
 		// Attempt to open the shared memory object (You need to use the same name as Task 2 in Radar)
         // In case of error, retry until successful
-        // e.g. shm_open("/radar_shared_mem", O_RDONLY, 0666);
+        const char* shm_name = SHARED_MEMORY_NAME;
+        shm_fd = shm_open(shm_name, O_RDONLY, 0666);
+
+        if (shm_fd == -1) {
+            std::cerr << "Waiting for shared memory to be created by Radar..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
         // COEN320 Task 3.3
 		// Map the shared memory object into the process's address space
         // The shared memory should be mapped to "shared_mem" (check for errors)
+
+        shared_mem = (SharedMemory*)mmap(NULL, sizeof(SharedMemory), PROT_READ, MAP_SHARED, shm_fd, 0);
+
+        if (shared_mem == MAP_FAILED) {
+            perror("mmap failed");
+            close(shm_fd);
+            shm_fd = -1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
         std::cout << "Shared memory initialized successfully." << std::endl;
         return true;
 	}
@@ -104,7 +122,32 @@ void ComputerSystem::monitorAirspace() {
 }
 
 void ComputerSystem::checkCollision(uint64_t currentTime, std::vector<msg_plane_info> planes) {
-    std::cout << "Checking for collisions at time: " << currentTime << std::endl;
+    //std::cout << "Checking for collisions at time: " << currentTime << std::endl;
+
+    for (int i = 0; i < planes.size(); i++){
+        for(int j = i+1; j< planes.size();j++){
+
+            if (checkAxes(planes[i], planes[j])){
+
+                // Prepare the message
+                Message_inter_process msg_to_send;
+                std::vector<std::pair<int, int>> collisionPairs;
+                // Store the collision pair plane ID 0 and 1
+                collisionPairs.emplace_back(planes[i].id, planes[j].id);
+                // Serialize collisionPairs
+                size_t numPairs = collisionPairs.size();
+                size_t dataSize = numPairs * sizeof(std::pair<int, int>);
+
+                msg_to_send.header = true;
+                msg_to_send.planeID = -1;
+                msg_to_send.type = MessageType::COLLISION_DETECTED;
+                msg_to_send.dataSize = dataSize;
+                std::memcpy(msg_to_send.data.data(), collisionPairs.data(), dataSize);
+                sendCollisionToDisplay(msg_to_send);
+            }
+        }
+    }
+
     // COEN320 Task 3.4
     // detect collisions between planes in the airspace within the time constraint
     // You need to Iterate through each pair of planes and in case of collision,
@@ -134,31 +177,83 @@ void ComputerSystem::checkCollision(uint64_t currentTime, std::vector<msg_plane_
     sendCollisionToDisplay(msg_to_send);
 
     */
-    
+
 }
 
 bool ComputerSystem::checkAxes(msg_plane_info plane1, msg_plane_info plane2) {
-    // COEN320 Task 3.4
+    // COEN320 Task 3.4 - Implementation
     // A collision is defined as two planes entering the defined airspace constraints within the time constraint
-    // You need to implement the logic to check if plane1 and plane2 will collide within the time constraint
-    // Return true if they will collide, false otherwise
-    // A simple approach is to just check if their positions will be within the defined constraints (e.g., CONSTRAINT_X, CONSTRAINT_Y, CONSTRAINT_Z)
-    // A more accurate approach would involve calculating their future positions based on their velocities
-    // and checking if those future positions will be within the defined constraints within the time constraint
-   
-    return true; // Placeholder return value; replace with actual collision detection logic
+    // Check if plane1 and plane2 will collide within the time constraint using their velocities
+
+    // Calculate the distance between the two planes
+    double dx = plane2.PositionX - plane1.PositionX;
+    double dy = plane2.PositionY - plane1.PositionY;
+    double dz = plane2.PositionZ - plane1.PositionZ;
+
+    double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Define a collision threshold (minimum safe separation)
+    const double COLLISION_THRESHOLD = 5000.0; // 5 km minimum separation
+
+    // Check if current distance is within collision threshold
+    if (distance < COLLISION_THRESHOLD) {
+        return true; // Collision detected
+    }
+
+    // Predict future positions based on velocities
+    // Calculate relative velocity
+    double relative_vx = plane2.VelocityX - plane1.VelocityX;
+    double relative_vy = plane2.VelocityY - plane1.VelocityY;
+    double relative_vz = plane2.VelocityZ - plane1.VelocityZ;
+
+    // Check if planes are converging (moving towards each other)
+    // Using dot product of relative position and relative velocity
+    double dot_product = dx * relative_vx + dy * relative_vy + dz * relative_vz;
+
+    // If dot product is negative, planes are approaching
+    if (dot_product < 0) {
+        // Check predicted collision by calculating closest approach distance
+        // For simplicity, check if they will be within constraints in near future
+        double future_x1 = plane1.PositionX + plane1.VelocityX;
+        double future_y1 = plane1.PositionY + plane1.VelocityY;
+        double future_z1 = plane1.PositionZ + plane1.VelocityZ;
+
+        double future_x2 = plane2.PositionX + plane2.VelocityX;
+        double future_y2 = plane2.PositionY + plane2.VelocityY;
+        double future_z2 = plane2.PositionZ + plane2.VelocityZ;
+
+        double future_dx = future_x2 - future_x1;
+        double future_dy = future_y2 - future_y1;
+        double future_dz = future_z2 - future_z1;
+
+        double future_distance = std::sqrt(future_dx * future_dx + future_dy * future_dy + future_dz * future_dz);
+
+        if (future_distance < COLLISION_THRESHOLD) {
+            return true; // Collision predicted
+        }
+    }
+
+    return false; // No collision detected
 }
 
 
 void ComputerSystem::sendCollisionToDisplay(const Message_inter_process& msg){
 	int display_channel = name_open(display_channel_name, 0);
-	if (display_channel == -1) {
-		throw std::runtime_error("Computer system: Error occurred while attaching to display");
-	}
-	int reply;
 
+	if (display_channel == -1) {
+	    name_close(display_channel);
+	    return;
+		// Amir: I removed it so it won't crash
+		// throw std::runtime_error("Computer system: Error occurred while attaching to display");
+	}
+
+
+	int reply;
 	int status = MsgSend(display_channel, &msg, sizeof(msg), &reply, sizeof(reply));
 	if (status == -1) {
 		perror("Computer system: Error occurred while sending message to display channel");
 	}
+
+    // Close the channel
+    name_close(display_channel);
 }

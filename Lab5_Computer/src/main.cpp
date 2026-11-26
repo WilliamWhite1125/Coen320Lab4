@@ -11,9 +11,12 @@ int main() {
     You may use Message_inter_process with MessageType to communicate with Aircrafts:
     MessageType::REQUEST_CHANGE_OF_HEADING, MessageType::REQUEST_CHANGE_POSITION, MessageType::REQUEST_CHANGE_ALTITUDE
     // check OperatorConsole.h and CommunicationsSystem.h for a template
-    // OperatorConsole console;
+    OperatorConsole console;
     // CommunicationsSystem comms;
     */
+
+    OperatorConsole console;
+    //CommunicationsSystem comms;
     if (computerSystem.startMonitoring()) {
         computerSystem.joinThread();
     } else {

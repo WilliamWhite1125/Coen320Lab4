@@ -1,6 +1,11 @@
 #include "Radar.h"
+#include "Msg_structs.h"
 #include <sys/dispatch.h>
+#include <semaphore.h>
 
+#define SHM_NAME "/mammad_buffer"
+#define SHM_SIZE sizeof(SharedMemory)
+#define SEM_NAME "/mammad_sem"
 
 Radar::Radar(uint64_t& tick_counter) : tick_counter_ref(tick_counter), activeBufferIndex(0), timer(1,0), stopThreads(false) {
 	clearSharedMemory(); //For future Use
@@ -43,7 +48,7 @@ std::vector<msg_plane_info>& Radar::getActiveBuffer() {
 //To choose the channel with concatenating your group name with "Radar"
 //Note: It is critical to not interfere with other groups
 void Radar::ListenAirspaceArrivalAndDeparture() {
-	Radar_channel = name_attach(NULL, "your_group_name_or_Radar_id", 0);
+	Radar_channel = name_attach(NULL, "mammad_radar", 0);
 	if (Radar_channel == NULL) {
 		std::cerr << "Failed to create channel for Radar" << std::endl;
 		exit(EXIT_FAILURE);
@@ -141,7 +146,7 @@ msg_plane_info Radar::getAircraftData(int id) {
 	//Coen320_Lab4 (Task0): You need to correct the channel name
 	//You may use your group name + plane id
 
-	std::string id_str = "your_group_name_or_id"+std::to_string(id);  // Convert integer id to string
+	std::string id_str = "mammad_radar"+std::to_string(id);  // Convert integer id to string
 	const char* ID = id_str.c_str();         // Convert string to const char*
 	int plane_channel = name_open(ID, 0);
 
@@ -223,6 +228,69 @@ void Radar::writeToSharedMemory() {
 	// clean up
 
 	*/
+int shm_fd;
+    SharedMemory *shared_mem;
+    sem_t *sem;
+
+    // Create or open shared memory object
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open");
+        exit(EXIT_FAILURE);
+    }
+
+    // Set the size of shared memory
+    if (ftruncate(shm_fd, SHM_SIZE) == -1) {
+        perror("ftruncate");
+        exit(EXIT_FAILURE);
+    }
+
+    // Map shared memory into process address space
+    shared_mem = (SharedMemory *)mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE,
+    MAP_SHARED, shm_fd, 0);
+    if (shared_mem == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
+
+    sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
+    if (sem == SEM_FAILED) {
+        perror("sem_open");
+        exit(EXIT_FAILURE);
+    }
+
+    // Lock the shared buffer for the whole snapshot update
+    sem_wait(sem);
+    std::vector<msg_plane_info>& activeBuffer = getActiveBuffer();
+   	int inactiveBufferIndex = (activeBufferIndex + 1) % 2;
+    shared_mem->timestamp = tick_counter_ref;
+
+    if (activeBuffer.empty()) {
+		std::vector<msg_plane_info>& inactiveBuffer = planesInAirspaceData[inactiveBufferIndex];
+		if (!inactiveBuffer.empty()){
+			shared_mem->is_empty.store(false);
+			shared_mem->count = inactiveBuffer.size();
+			std::memcpy(shared_mem->plane_data, inactiveBuffer.data(), inactiveBuffer.size() * sizeof(msg_plane_info));
+			inactiveBuffer.clear();
+		}
+		shared_mem->is_empty.store(true);
+		shared_mem->count = 0;  // No planes
+		{
+			std::lock_guard<std::mutex> lock(bufferSwitchMutex);
+		    activeBufferIndex = inactiveBufferIndex;
+		}
+	} else {
+        shared_mem->is_empty.store(false);
+        shared_mem->count = activeBuffer.size();
+        std::memcpy(shared_mem->plane_data, activeBuffer.data(), activeBuffer.size() * sizeof(msg_plane_info));
+        activeBuffer.clear();
+    }
+
+    sem_post(sem);
+    sem_close(sem);
+
+    munmap(shared_mem, SHM_SIZE);
+    close(shm_fd);
 	
 }
 
@@ -237,4 +305,47 @@ void Radar::clearSharedMemory() {
 	//sharedMemPtr->is_empty.store(true);  // Set the is_empty flag to false to not block reader
 	// Finally unmap the shared memory and close the file descriptor
 	
+	int shm_fd;
+    SharedMemory *shared_mem;
+    sem_t *sem;
+
+    // Create or open shared memory object
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        perror("shm_open");
+        exit(EXIT_FAILURE);
+    }
+
+    // Set the size of shared memory
+    if (ftruncate(shm_fd, SHM_SIZE) == -1) {
+        perror("ftruncate");
+        exit(EXIT_FAILURE);
+    }
+
+    // Map shared memory into process address space
+    shared_mem = (SharedMemory *)mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE,
+    MAP_SHARED, shm_fd, 0);
+    if (shared_mem == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
+
+    sem = sem_open(SEM_NAME, O_CREAT, 0666, 1);
+    if (sem == SEM_FAILED) {
+        perror("sem_open");
+        exit(EXIT_FAILURE);
+    }
+
+    sem_wait(sem);
+    // Clear the snapshot so readers see an empty airspace
+    std::memset(shared_mem->plane_data, 0, sizeof(shared_mem->plane_data));
+    shared_mem->count = 0;
+    shared_mem->timestamp = 0;
+    shared_mem->start = false;
+    shared_mem->is_empty.store(true);
+    sem_post(sem);
+    sem_close(sem);
+
+    munmap(shared_mem, SHM_SIZE);
+    close(shm_fd);
 }
