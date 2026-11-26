@@ -1,6 +1,7 @@
 #include <iostream>
 #include <iomanip>
 #include <memory>
+#include <cstring>
 #include <pthread.h>
 #include "Aircraft.h"
 #include "ATCTimer.h"
@@ -47,9 +48,9 @@ void Aircraft::printInitialAircraftData() const {
 
 
 void Aircraft::changeHeading(double Vx, double Vy, double Vz){
-	if (Vx > 0) speedX = Vx;
-	if (Vx > 0) speedY = Vy;
-	if (Vx > 0) speedZ = Vz;
+	speedX = Vx;
+	speedY = Vy;
+	speedZ = Vz;
 }
 
 
@@ -132,37 +133,109 @@ int Aircraft::updatePosition() {
             break;  // Exit the loop if out of bounds
         }
 
-        // Check for incoming position update requests from Radar
-        char buffer[sizeof(Message_inter_process)];  // Buffer to handle largest message size
-        int rcvid = MsgReceive(Plane_channel->chid, buffer, sizeof(buffer), NULL);
+        // Check for incoming Radar polls and CommunicationSystem commands.
+        // A union keeps the receive buffer correctly aligned on aarch64.
+        union ReceiveBuffer {
+            Message msg;                     // Radar poll (in-process)
+            Message_inter_process ipcMsg;    // Comms command (inter-process)
+        } received;
+
+        int rcvid = MsgReceive(Plane_channel->chid, &received, sizeof(received), NULL);
 
         if (rcvid != -1) {
+            // Radar only ever sends REQUEST_POSITION; everything else came
+            // through the CommunicationsSystem. Routing on type avoids relying
+            // on Radar's (currently uninitialised) header byte.
+            if (received.msg.type == MessageType::REQUEST_POSITION) {
+                msg_plane_info positionData = {id, posX, posY, posZ, speedX, speedY, speedZ};
+                Message posUpdateMessage = createPositionUpdateMessage(id, positionData);
 
-        	bool isInterProcess = buffer[0] & 0x01;
-            // Radar requested position data
-            if (isInterProcess){  //sporadic
-            	// Message is of type Message_inter_process
-            	Message_inter_process* receivedMsg = reinterpret_cast<Message_inter_process*>(buffer);
+                MsgReply(rcvid, 0, &posUpdateMessage, sizeof(posUpdateMessage));
+            } else {
+                Message_inter_process* receivedMsg = &received.ipcMsg;
 
-            	// Handle different message types using switch
-                // COEN320 Lab 4_5: You need to handle different message types here
-                // These commands come from Communication System
-                /*
-                switch (receivedMsg->type) {
-                    case MessageType::REQUEST_CHANGE_OF_HEADING:
-                    case MessageType::REQUEST_CHANGE_POSITION:
-                    ....
-                */
-            } else {  //periodic
-            	// Message is of type Message
-            	Message* receivedMsg = reinterpret_cast<Message*>(buffer);
+                if (receivedMsg->type == MessageType::REQUEST_AUGMENTED_INFO) {
+                    msg_plane_info info = {id, posX, posY, posZ, speedX, speedY, speedZ};
+                    MsgReply(rcvid, 0, &info, sizeof(info));
+                } else {
+                    int status = 0;
 
-            	if (receivedMsg->type == MessageType::REQUEST_POSITION) {
-            		msg_plane_info positionData = {id, posX, posY, posZ, speedX, speedY, speedZ};
-            	    Message posUpdateMessage = createPositionUpdateMessage(id, positionData);
+                    switch (receivedMsg->type) {
+                        case MessageType::REQUEST_CHANGE_OF_HEADING: {
+                            if (receivedMsg->dataSize < sizeof(msg_change_heading)) {
+                                status = -1;
+                                break;
+                            }
+                            msg_change_heading change;
+                            std::memcpy(&change, receivedMsg->data.data(), sizeof(change));
 
-            	    MsgReply(rcvid, 0, &posUpdateMessage, sizeof(posUpdateMessage)); // Send reply with position
-            	}
+                            // 0 or negative means "leave altitude unchanged"
+                            // (valid airspace altitudes are 15,000-40,000)
+                            if (change.altitude > 0.0 &&
+                                (change.altitude < airspace.lower_z_boundary ||
+                                 change.altitude > airspace.upper_z_boundary)) {
+                                status = -1;
+                                break;
+                            }
+
+                            changeHeading(change.VelocityX, change.VelocityY, change.VelocityZ);
+                            if (change.altitude > 0.0) {
+                                posZ = change.altitude;
+                                speedZ = 0.0;
+                            }
+                            break;
+                        }
+
+                        case MessageType::REQUEST_CHANGE_POSITION: {
+                            if (receivedMsg->dataSize < sizeof(msg_change_position)) {
+                                status = -1;
+                                break;
+                            }
+                            msg_change_position change;
+                            std::memcpy(&change, receivedMsg->data.data(), sizeof(change));
+
+                            if (change.x < airspace.lower_x_boundary ||
+                                change.x > airspace.upper_x_boundary ||
+                                change.y < airspace.lower_y_boundary ||
+                                change.y > airspace.upper_y_boundary ||
+                                change.z < airspace.lower_z_boundary ||
+                                change.z > airspace.upper_z_boundary) {
+                                status = -1;
+                                break;
+                            }
+
+                            posX = change.x;
+                            posY = change.y;
+                            posZ = change.z;
+                            break;
+                        }
+
+                        case MessageType::REQUEST_CHANGE_ALTITUDE: {
+                            if (receivedMsg->dataSize < sizeof(double)) {
+                                status = -1;
+                                break;
+                            }
+                            double altitude = 0.0;
+                            std::memcpy(&altitude, receivedMsg->data.data(), sizeof(altitude));
+
+                            if (altitude < airspace.lower_z_boundary ||
+                                altitude > airspace.upper_z_boundary) {
+                                status = -1;
+                                break;
+                            }
+
+                            posZ = altitude;
+                            speedZ = 0.0;   // hold the new altitude
+                            break;
+                        }
+
+                        default:
+                            status = -1;    // unsupported command
+                            break;
+                    }
+
+                    MsgReply(rcvid, 0, &status, sizeof(status));
+                }
             }
         }
 
