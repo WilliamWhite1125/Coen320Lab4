@@ -1,4 +1,7 @@
 
+#define Radar "mammad_radar" //attach point for AirTrafficControl
+
+
 OperatorConsole::OperatorConsole() : exit(false) {
     Operator_Console = std::thread(&OperatorConsole::HandleConsoleInputs, this);
 }
@@ -75,7 +78,7 @@ void OperatorConsole::HandleConsoleInputs() {
 }
 
 void OperatorConsole::sendVelocityCommand(int aircraftID, double vx, double vy, double vz){ 
-  const char* ID = "TODO: Correct Aircraft channel";
+  const char* ID = Radar + +std::to_string(aircraftID);
   int aircraft_channel = name_open(ID, 0);
 
   if (aircraft_channel == -1) {
@@ -116,7 +119,7 @@ void OperatorConsole::sendVelocityCommand(int aircraftID, double vx, double vy, 
 }
 
 void OperatorConsole::sendPositionCommand(int aircraftID, double x, double y, double z) {
-  const char* ID = "TODO: Correct Aircraft channel";
+  const char* ID = Radar + +std::to_string(aircraftID);
   int aircraft_channel = name_open(ID, 0);
 
   if (aircraft_channel == -1) {
@@ -153,7 +156,7 @@ void OperatorConsole::sendPositionCommand(int aircraftID, double x, double y, do
 
 
 void OperatorConsole::sendAltitudeCommand(int aircraftID, double altitude) {
-  const char* ID = "TODO: Correct Aircraft channel";
+  const char* ID = Radar + +std::to_string(aircraftID);
   int aircraft_channel = name_open(ID, 0);
 
   if (aircraft_channel == -1) {
