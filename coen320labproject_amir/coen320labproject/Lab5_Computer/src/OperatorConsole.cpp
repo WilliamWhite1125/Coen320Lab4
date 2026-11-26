@@ -8,11 +8,15 @@
 //Amir: added includes for input parsing/validation
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <poll.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include <sys/dispatch.h>
@@ -20,6 +24,8 @@
 
 #include "OperatorConsole.h"
 #include "Msg_structs.h"
+
+#define COMMS_CHANNEL_NAME "mammad_comms"
 
 //Amir: helpers for reading and validating operator input
 namespace {
@@ -76,6 +82,47 @@ bool parseNumber(const std::string& text, double& value) {
     }
 }
 
+void sendToComms(const Message_inter_process& msg) {
+    int coid = name_open(COMMS_CHANNEL_NAME, 0);
+    if (coid == -1) {
+        std::cerr << "Operator Console: communications system is not running ("
+                  << COMMS_CHANNEL_NAME << ")\n";
+        return;
+    }
+
+    if (msg.type == MessageType::REQUEST_AUGMENTED_INFO) {
+        msg_plane_info info;
+        std::memset(&info, 0, sizeof(info));
+
+        const int rc = MsgSend(coid, &msg, sizeof(msg), &info, sizeof(info));
+        name_close(coid);
+
+        if (rc == -1) {
+            std::perror("Operator Console: MsgSend failed");
+        } else if (info.id < 0) {
+            std::cerr << "Operator Console: aircraft did not answer\n";
+        } else {
+            std::cout << "Operator Console: aircraft " << info.id << " pos ("
+                      << info.PositionX << ", " << info.PositionY << ", "
+                      << info.PositionZ << ") vel (" << info.VelocityX << ", "
+                      << info.VelocityY << ", " << info.VelocityZ << ")\n";
+        }
+        return;
+    }
+
+    int status = -1;
+    const int rc = MsgSend(coid, &msg, sizeof(msg), &status, sizeof(status));
+    name_close(coid);
+
+    if (rc == -1) {
+        std::perror("Operator Console: MsgSend failed");
+    } else if (status != 0) {
+        std::cerr << "Operator Console: request rejected\n";
+    } else {
+        std::cout << "Operator Console: delivered\n";
+    }
+}
+
 } // namespace
 
 OperatorConsole::OperatorConsole() {
@@ -97,13 +144,40 @@ OperatorConsole::~OperatorConsole() {
 void OperatorConsole::HandleConsoleInputs() {
     printUsage();
 
+    bool promptShown = false;
     std::string line;
+
     while (!exit.load()) {
-        std::cout << "> " << std::flush;
+        if (!promptShown) {
+            std::cout << "> " << std::flush;
+            promptShown = true;
+        }
+
+        // Poll stdin so ~OperatorConsole() doesn't hang in join().
+        struct pollfd pfd;
+        pfd.fd = STDIN_FILENO;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+
+        const int ready = poll(&pfd, 1, 200);
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (ready == 0) {
+            continue;  // timeout; re-check exit
+        }
+        if (!(pfd.revents & (POLLIN | POLLHUP))) {
+            break;
+        }
+
         if (!std::getline(std::cin, line)) {
             // stdin was closed; there is nothing left to read.
             break;
         }
+        promptShown = false;
 
         line = trim(line);
         if (line.empty()) {
@@ -121,6 +195,14 @@ void OperatorConsole::HandleConsoleInputs() {
 
         //Amir: allow the input thread to terminate cleanly
         if (command == "EXIT" || command == "QUIT") {
+            Message_inter_process exitMsg;
+            std::memset(&exitMsg, 0, sizeof(exitMsg));
+            exitMsg.header = true;
+            exitMsg.type = MessageType::EXIT;
+            exitMsg.planeID = -1;
+            exitMsg.dataSize = 0;
+            sendToComms(exitMsg);
+
             std::cout << "Operator Console: exiting.\n";
             exit.store(true);
             break;
@@ -224,9 +306,10 @@ void OperatorConsole::HandleConsoleInputs() {
             continue;
         }
 
-        std::cout << "Operator Console: parsed " << command << " for plane "
-                  << msg.planeID << " (" << msg.dataSize << " payload bytes)\n";
-        //Amir: TODO - dispatch "msg" to CommunicationsSystem / ComputerSystem.
+        logCommand(msg.planeID >= 0
+                       ? command + " for plane " + std::to_string(msg.planeID)
+                       : command);
+        sendToComms(msg);
     }
 
     std::cout << "Operator Console: input thread stopped.\n";
